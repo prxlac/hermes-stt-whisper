@@ -1,0 +1,5 @@
+name: whisper-asr
+version: "1.0.0"
+description: "Self-hosted whisper-asr-webservice (ahmetoner) as a Hermes speech-to-text provider. Points at any /asr endpoint (default http://localhost:9000) and registers stt.provider=whisper-asr."
+author: "Alan"
+hooks: []
