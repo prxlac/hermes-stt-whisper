@@ -36,6 +36,7 @@ from typing import Any, Dict
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import whisper_asr_core as core  # noqa: E402
+import whisper_asr_router as router  # noqa: E402
 
 
 def _resolve_config_path(explicit: str) -> str:
@@ -65,6 +66,11 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="whisper-asr STT command provider")
     parser.add_argument("--config", default="", help="config.yaml to read stt.whisper-asr from")
     parser.add_argument("--base-url", default="", help="override the endpoint (per-profile, inline)")
+    parser.add_argument(
+        "--backend",
+        default="auto",
+        help="auto (config order: mac then ws) | mac | ws",
+    )
     parser.add_argument("--task", default="", help="transcribe | translate")
     parser.add_argument("--vad", action="store_true", help="enable server-side VAD filtering")
     parser.add_argument("--prompt", default="", help="initial_prompt vocabulary hint")
@@ -84,15 +90,25 @@ def main(argv: list[str] | None = None) -> int:
     if args.prompt.strip():
         settings["prompt"] = args.prompt.strip()
 
-    result = core.transcribe_file(
+    result = router.transcribe_any(
         args.input_path,
         settings=settings,
         language=args.language.strip() or None,
         model=args.model.strip() or None,
+        prompt=settings.get("prompt") or None,
+        backend=args.backend,
     )
     if not result.get("success"):
         print(f"whisper-asr: {result.get('error') or 'transcription failed'}", file=sys.stderr)
         return 1
+
+    if os.environ.get("HERMES_WHISPER_ASR_DEBUG"):
+        stamp = ", ".join(
+            f"{item['backend']}={'ok' if item.get('ok') else 'fail'}"
+            + (f" [{item.get('error')}]" if not item.get("ok") and item.get("error") else "")
+            for item in result.get("attempts") or []
+        )
+        print(f"whisper-asr: backend={result.get('backend')} ({stamp})", file=sys.stderr)
 
     transcript = str(result.get("transcript") or "")
     Path(args.output_path).write_text(transcript, encoding="utf-8")

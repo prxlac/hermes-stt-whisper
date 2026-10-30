@@ -1,7 +1,9 @@
 # whisper-asr
 
 Self-hosted **whisper-asr-webservice** (`ahmetoner/whisper-asr-webservice`) as a Hermes
-speech-to-text provider. Points at any `/asr` endpoint — default `http://localhost:9000`.
+speech-to-text provider, plus a **router** that prefers a Mac running mlx-whisper over
+SSH (~28x realtime) and falls back to the webservice (~0.7x realtime) when the Mac is
+asleep, off the network, or its venv is gone.
 
 | | |
 |---|---|
@@ -9,7 +11,7 @@ speech-to-text provider. Points at any `/asr` endpoint — default `http://local
 | Selection | `stt.provider: whisper-asr` |
 | Config section | `stt.whisper-asr` |
 | Credentials | none (endpoint URL only) |
-| Dependencies | none (stdlib `urllib`) |
+| Dependencies | none (stdlib `urllib`/`subprocess`; `ssh`, `scp` and `ffmpeg` for the `mac` backend) |
 
 ## Install
 
@@ -58,6 +60,47 @@ done
 The endpoint is passed inline (`--base-url`) on purpose: the command string is already
 per-profile config, so the shim needs no config lookup and cannot read another profile's
 file. For the Python plugin path, `load_config()` is profile-scoped.
+
+## Routing: the Mac first, webservice as fallback
+
+Each transcription is normalised to 16 kHz mono WAV (local ffmpeg) and then handed to the
+backends listed in `stt.whisper-asr.order`; the first one that returns text wins.
+
+```yaml
+stt:
+  whisper-asr:
+    base_url: http://localhost:9000
+    language: hr
+    order: [mac, ws]                                  # backend ids: mac, ws
+    mac:
+      enabled: true
+      host: mac-stt                                   # ssh alias for the Mac
+      venv_python: ~/mlx-asr/venv/bin/python          # venv with mlx-whisper on it
+      model: mlx-community/whisper-large-v3-turbo
+      probe_timeout: 2                                # ssh ConnectTimeout for the probe
+      down_ttl: 120                                   # remember a failed probe this long
+      timeout: 300
+      ffmpeg: ""                                      # "" -> PATH, then ~/.hermes/tools/ffmpeg-*
+```
+
+How it behaves:
+
+* **Probe** — one `ssh -o BatchMode=yes <host> 'test -x <venv> && echo HERMES_ASR_OK'`.
+  It checks reachability *and* that the venv still exists, so a broken Mac does not get a
+  scp before failing. A failed probe is cached for `down_ttl`, so a sleeping Mac costs one
+  short timeout instead of one per message.
+* **Run** — scp the WAV plus `remote/mlx_transcribe.py` to `/tmp`, run that script with the
+  mlx venv python, `cat` back `<base>.txt`, delete the remote files. The remote script
+  loads the WAV with stdlib `wave` and passes a float32 array to
+  `mlx_whisper.transcribe`, because the Mac has no ffmpeg and the CLI needs it.
+* **Fallback** — any failure (probe, scp, non-zero mlx exit, empty transcript) moves to the
+  next backend. Each attempt's error comes back in `attempts`, so a fallback is visible
+  instead of looking like the fast path worked.
+* **Forced backend** — `transcribe.py --backend ws` keeps a recording on the server;
+  `--backend mac` skips the probe. `HERMES_WHISPER_ASR_DEBUG=1` prints
+  `backend=... (mac=fail [reason], ws=ok)` on stderr.
+* **Selftest** — `./selftest.sh` runs the four cases (forced mac, auto order, forced ws,
+  fallback) against a synthesised clip.
 
 ## Config
 

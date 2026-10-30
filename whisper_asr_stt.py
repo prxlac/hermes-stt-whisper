@@ -10,6 +10,7 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional
 
 import whisper_asr_core as core
+import whisper_asr_router as router
 
 from agent.transcription_provider import TranscriptionProvider
 
@@ -55,18 +56,21 @@ class WhisperAsrProvider(TranscriptionProvider):
     ) -> Dict[str, Any]:
         """Envelope: ``success``, ``transcript`` (empty on failure), ``provider``, ``error``."""
         prompt = extra.get("prompt")
-        result = core.transcribe_file(
+        result = router.transcribe_any(
             file_path,
             settings=core.load_settings(),
             language=language,
             model=model,
             prompt=prompt if isinstance(prompt, str) else None,
+            backend="auto",
         )
         envelope: Dict[str, Any] = {
             "success": bool(result.get("success")),
             "transcript": str(result.get("transcript") or ""),
             "provider": PROVIDER_NAME,
         }
+        if result.get("backend"):
+            envelope["backend"] = result["backend"]
         if not envelope["success"]:
             envelope["error"] = str(result.get("error") or "whisper-asr transcription failed")
         return envelope

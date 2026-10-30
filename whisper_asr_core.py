@@ -127,6 +127,14 @@ def load_settings(config_path: Optional[str] = None) -> Dict[str, Any]:
     if task not in {"transcribe", "translate"}:
         task = DEFAULT_TASK
 
+    order_raw = data.get("order")
+    if isinstance(order_raw, str):
+        order = [part.strip().lower() for part in order_raw.split(",") if part.strip()]
+    elif isinstance(order_raw, (list, tuple)):
+        order = [str(part).strip().lower() for part in order_raw if str(part).strip()]
+    else:
+        order = []
+
     return {
         "base_url": base_url,
         "task": task,
@@ -136,6 +144,8 @@ def load_settings(config_path: Optional[str] = None) -> Dict[str, Any]:
         "word_timestamps": _truthy(data.get("word_timestamps"), False),
         "timeout": _number(data.get("timeout"), DEFAULT_TIMEOUT),
         "model": str(data.get("model") or "").strip(),
+        "order": order,
+        "mac": data.get("mac") if isinstance(data.get("mac"), dict) else {},
     }
 
 
@@ -163,6 +173,66 @@ def _multipart(field: str, file_path: Path) -> Tuple[bytes, str]:
     ).encode("utf-8")
     tail = f"\r\n--{boundary}--\r\n".encode("utf-8")
     return head + file_path.read_bytes() + tail, f"multipart/form-data; boundary={boundary}"
+
+
+def prepare_wav16k(
+    file_path: str,
+    *,
+    ffmpeg: str = "",
+    timeout: float = 120.0,
+) -> Dict[str, Any]:
+    """Convert any readable audio to a private 16 kHz mono PCM WAV.
+
+    Both backends want that exact format: mlx needs it (the Mac has no ffmpeg) and the
+    webservice fails *silently* on AAC/.m4a (HTTP 200 with an empty body), so converting
+    once up front removes that trap for both.
+
+    Returns ``{"path": ..., "workdir": ..., "error": None}`` or ``{"error": msg}``; the
+    caller removes ``workdir``. Never raises.
+    """
+    import shutil  # noqa: PLC0415 — local: keeps module import cost at zero for the plugin
+    import subprocess  # noqa: PLC0415
+    import tempfile  # noqa: PLC0415
+
+    source = Path(file_path).expanduser()
+    if not source.exists():
+        return {"error": f"Audio file not found: {file_path}"}
+    if source.stat().st_size == 0:
+        return {"error": f"Audio file is empty: {file_path}"}
+
+    binary = ffmpeg or shutil.which("ffmpeg") or ""
+    if not binary:
+        # The gateway may not inherit the user's PATH; Hermes ships its own ffmpeg.
+        candidates = sorted(Path.home().glob(".hermes/tools/ffmpeg-*/ffmpeg"))
+        binary = str(candidates[-1]) if candidates else ""
+    if not binary:
+        return {"error": "ffmpeg not found (set stt.whisper-asr.mac.ffmpeg)"}
+
+    workdir = tempfile.mkdtemp(prefix="hermes-asr-")
+    target = Path(workdir) / "in16k.wav"
+    try:
+        proc = subprocess.run(
+            [binary, "-y", "-loglevel", "error", "-i", str(source), "-ac", "1",
+             "-ar", "16000", "-c:a", "pcm_s16le", str(target)],
+            capture_output=True, text=True, timeout=timeout, check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        shutil.rmtree(workdir, ignore_errors=True)
+        return {"error": f"ffmpeg conversion failed: {exc}"}
+    if proc.returncode != 0 or not target.exists() or target.stat().st_size == 0:
+        detail = " ".join((proc.stderr or proc.stdout or "").split())[:300]
+        shutil.rmtree(workdir, ignore_errors=True)
+        return {"error": f"ffmpeg conversion failed: {detail or f'exit {proc.returncode}'}"}
+    return {"path": str(target), "workdir": workdir, "error": None}
+
+
+def cleanup_prepared(prepared: Dict[str, Any]) -> None:
+    """Remove the temp dir handed out by :func:`prepare_wav16k`. Never raises."""
+    import shutil  # noqa: PLC0415
+
+    workdir = prepared.get("workdir") if isinstance(prepared, dict) else None
+    if workdir:
+        shutil.rmtree(str(workdir), ignore_errors=True)
 
 
 def _post(url: str, body: bytes, content_type: str, timeout: float) -> Tuple[int, str]:
